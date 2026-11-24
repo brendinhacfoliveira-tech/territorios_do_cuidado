@@ -1,0 +1,795 @@
+
+# ============================================================
+# ANÁLISE ESTATÍSTICA DA HANSENÍASE POR ESTADO
+# Projeto: Territórios do Cuidado
+# ============================================================
+
+# BIBLIOTECAS
+
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import statsmodels.api as sm
+import plotly.graph_objects as go
+
+from pathlib import Path
+import warnings
+
+warnings.filterwarnings("ignore")
+
+
+# ============================================================
+# 1. CONFIGURAÇÕES
+# ============================================================
+
+# Localiza automaticamente a pasta do projeto.
+PASTA = Path(__file__).resolve().parent
+
+# Arquivo Excel na raiz do repositório.
+ARQUIVO = PASTA / "base_projeto.xlsx"
+
+# Nome da aba que será analisada.
+ABA = "Casos_hanseniase"
+
+# Quantidade de anos para projeção.
+HORIZONTE = 10
+
+# Pasta de resultados.
+RESULTADOS = PASTA / "resultados"
+GRAFICOS = RESULTADOS / "graficos"
+
+GRAFICOS.mkdir(parents=True, exist_ok=True)
+
+
+# ============================================================
+# 2. IMPORTAÇÃO DA BASE
+# ============================================================
+
+if not ARQUIVO.exists():
+    raise FileNotFoundError(
+        "Arquivo base_projeto.xlsx não encontrado na pasta do projeto."
+    )
+
+df_original = pd.read_excel(
+    ARQUIVO,
+    sheet_name=ABA,
+    engine="openpyxl"
+)
+
+df_original.columns = df_original.columns.astype(str).str.strip()
+
+print("\nBASE ORIGINAL")
+print(df_original.head())
+
+
+# ============================================================
+# 3. TRATAMENTO E ORGANIZAÇÃO
+# ============================================================
+
+# Primeira coluna: identificação dos estados.
+coluna_uf = df_original.columns[0]
+
+df_original = df_original.rename(
+    columns={coluna_uf: "UF"}
+)
+
+df_original["UF"] = (
+    df_original["UF"]
+    .astype(str)
+    .str.strip()
+    .str.upper()
+)
+
+df_original = df_original[
+    ~df_original["UF"].isin(["", "NAN", "NONE", "UF/ANO", "UF"])
+].copy()
+
+
+# Identifica automaticamente as colunas de anos.
+colunas_anos = {}
+
+for coluna in df_original.columns:
+
+    if coluna == "UF":
+        continue
+
+    try:
+        ano = int(str(coluna).strip())
+
+        if 1900 <= ano <= 2100:
+            colunas_anos[coluna] = ano
+
+    except ValueError:
+        continue
+
+
+if not colunas_anos:
+    raise ValueError("Não foram identificadas colunas com anos.")
+
+
+# Converte valores no padrão brasileiro para números.
+def converter_valor(valor):
+
+    if pd.isna(valor):
+        return np.nan
+
+    if isinstance(valor, (int, float, np.number)):
+        return float(valor)
+
+    valor = str(valor).strip()
+
+    if valor in ["", "-", "—"]:
+        return np.nan
+
+    if "," in valor:
+        valor = valor.replace(".", "").replace(",", ".")
+
+    else:
+        partes = valor.split(".")
+
+        if (
+            len(partes) == 2
+            and len(partes[1]) == 3
+            and partes[0].isdigit()
+        ):
+            valor = valor.replace(".", "")
+
+    return pd.to_numeric(valor, errors="coerce")
+
+
+# Transforma a base para formato longo.
+base_longa = df_original.melt(
+    id_vars="UF",
+    value_vars=list(colunas_anos.keys()),
+    var_name="Ano",
+    value_name="Casos"
+)
+
+base_longa["Ano"] = base_longa["Ano"].map(colunas_anos)
+
+base_longa["Casos"] = base_longa["Casos"].apply(
+    converter_valor
+)
+
+# Reconstrói a base:
+# Linhas = anos
+# Colunas = estados
+
+df = base_longa.pivot_table(
+    index="Ano",
+    columns="UF",
+    values="Casos",
+    aggfunc="first"
+).sort_index().reset_index()
+
+df.columns.name = None
+
+estados = [
+    coluna for coluna in df.columns
+    if coluna != "Ano"
+]
+
+print("\nBASE TRATADA")
+print(df.head())
+
+print("\nEstados analisados:", estados)
+
+print("Período:", df["Ano"].min(), "-", df["Ano"].max())
+
+
+# ============================================================
+# 4. ESTATÍSTICA DESCRITIVA POR ESTADO
+# ============================================================
+
+medidas = {}
+
+for estado in estados:
+
+    dados = df[estado].dropna()
+
+    modas = dados.mode()
+
+    moda = (
+        ", ".join(map(str, modas.tolist()))
+        if len(modas) > 0
+        else np.nan
+    )
+
+    medidas[estado] = {
+
+        "N": dados.count(),
+
+        "Média": dados.mean(),
+
+        "Mediana": dados.median(),
+
+        "Moda": moda,
+
+        "Mínimo": dados.min(),
+
+        "Máximo": dados.max(),
+
+        "Amplitude": dados.max() - dados.min(),
+
+        "Variância": dados.var(ddof=1),
+
+        "Desvio Padrão": dados.std(ddof=1),
+
+        "Coeficiente de Variação (%)":
+            dados.std(ddof=1) / dados.mean() * 100
+            if dados.mean() != 0 else np.nan,
+
+        "1º Quartil": dados.quantile(0.25),
+
+        "3º Quartil": dados.quantile(0.75),
+
+        "Assimetria": dados.skew(),
+
+        "Curtose": dados.kurtosis()
+    }
+
+
+tabela_descritiva = pd.DataFrame(medidas)
+
+print("\nESTATÍSTICA DESCRITIVA POR ESTADO")
+
+print(tabela_descritiva.round(3).to_string())
+
+
+# ============================================================
+# 5. MATRIZ DE CORRELAÇÃO
+# ============================================================
+
+matriz_correlacao = df.corr(method="pearson")
+
+print("\nMATRIZ DE CORRELAÇÃO")
+
+print(matriz_correlacao.round(3).to_string())
+
+
+plt.figure(figsize=(14, 10))
+
+plt.imshow(
+    matriz_correlacao,
+    cmap="coolwarm",
+    vmin=-1,
+    vmax=1
+)
+
+plt.colorbar(label="Correlação de Pearson")
+
+plt.xticks(
+    range(len(matriz_correlacao.columns)),
+    matriz_correlacao.columns,
+    rotation=45,
+    ha="right"
+)
+
+plt.yticks(
+    range(len(matriz_correlacao.index)),
+    matriz_correlacao.index
+)
+
+for i in range(len(matriz_correlacao.index)):
+
+    for j in range(len(matriz_correlacao.columns)):
+
+        valor = matriz_correlacao.iloc[i, j]
+
+        if pd.notna(valor):
+
+            plt.text(
+                j, i,
+                f"{valor:.2f}",
+                ha="center",
+                va="center",
+                fontsize=7
+            )
+
+plt.title("Matriz de Correlação - Hanseníase por Estado")
+
+plt.tight_layout()
+
+plt.savefig(GRAFICOS / "matriz_correlacao.png", dpi=150)
+
+plt.show()
+
+plt.close()
+
+
+# ============================================================
+# 6. MEDIDAS ESTATÍSTICAS POR ANO
+# ============================================================
+
+medidas_ano = []
+
+for _, linha in df.iterrows():
+
+    valores = linha[estados].dropna()
+
+    moda = valores.mode()
+
+    medidas_ano.append({
+
+        "Ano": int(linha["Ano"]),
+
+        "Média": valores.mean(),
+
+        "Mediana": valores.median(),
+
+        "Moda": moda.iloc[0] if len(moda) > 0 else np.nan,
+
+        "Amplitude": valores.max() - valores.min(),
+
+        "Variância": valores.var(ddof=1),
+
+        "Desvio Padrão": valores.std(ddof=1),
+
+        "Mínimo": valores.min(),
+
+        "Máximo": valores.max()
+    })
+
+
+tabela_ano = pd.DataFrame(medidas_ano)
+
+print("\nMEDIDAS ESTATÍSTICAS POR ANO")
+
+print(tabela_ano.round(3).to_string(index=False))
+
+
+# ============================================================
+# 7. COMPARAÇÃO TEMPORAL
+# ============================================================
+
+medidas_comparar = [
+    "Média",
+    "Mediana",
+    "Amplitude",
+    "Variância",
+    "Desvio Padrão"
+]
+
+comparacoes = []
+
+for medida in medidas_comparar:
+
+    indice_max = tabela_ano[medida].idxmax()
+
+    indice_min = tabela_ano[medida].idxmin()
+
+    ultimo = tabela_ano.iloc[-1]
+
+    comparacoes.append({
+
+        "Medida": medida,
+
+        "Ano Maior Valor":
+            tabela_ano.loc[indice_max, "Ano"],
+
+        "Maior Valor":
+            tabela_ano.loc[indice_max, medida],
+
+        "Ano Menor Valor":
+            tabela_ano.loc[indice_min, "Ano"],
+
+        "Menor Valor":
+            tabela_ano.loc[indice_min, medida],
+
+        "Valor no Último Ano":
+            ultimo[medida]
+    })
+
+
+comparacao_temporal = pd.DataFrame(comparacoes)
+
+print("\nCOMPARAÇÃO TEMPORAL")
+
+print(comparacao_temporal.round(3).to_string(index=False))
+
+
+# ============================================================
+# 8. REGRESSÕES LINEARES POR ESTADO
+# ============================================================
+
+# Modelo:
+# Casos = beta0 + beta1 * Ano
+#
+# H0: beta1 = 0
+# H1: beta1 diferente de 0
+#
+# Significância: 5%
+
+resultados_regressao = []
+
+modelos = {}
+
+for estado in estados:
+
+    dados_estado = df[["Ano", estado]].dropna()
+
+    if len(dados_estado) < 2:
+        continue
+
+    X = sm.add_constant(
+        dados_estado["Ano"]
+    )
+
+    Y = dados_estado[estado]
+
+    modelo = sm.OLS(Y, X).fit()
+
+    modelos[estado] = modelo
+
+    intercepto = modelo.params["const"]
+
+    coeficiente = modelo.params["Ano"]
+
+    p_valor = modelo.pvalues["Ano"]
+
+    if coeficiente > 0:
+        tendencia = "Crescente"
+
+    elif coeficiente < 0:
+        tendencia = "Decrescente"
+
+    else:
+        tendencia = "Estável"
+
+    significancia = (
+        "Significativa"
+        if p_valor < 0.05
+        else "Não significativa"
+    )
+
+    resultados_regressao.append({
+
+        "Estado": estado,
+
+        "Intercepto": intercepto,
+
+        "Coeficiente_Ano": coeficiente,
+
+        "R²": modelo.rsquared,
+
+        "P-valor": p_valor,
+
+        "Tendência": tendencia,
+
+        "Significância": significancia,
+
+        "Equação":
+            f"Y = {intercepto:.2f} + ({coeficiente:.4f} × Ano)"
+    })
+
+
+tabela_regressoes = pd.DataFrame(resultados_regressao)
+
+print("\nRESULTADOS DAS REGRESSÕES")
+
+print(tabela_regressoes.round(4).to_string(index=False))
+
+
+# ============================================================
+# 9. GRÁFICOS DAS REGRESSÕES
+# ============================================================
+
+for estado in estados:
+
+    if estado not in modelos:
+        continue
+
+    dados_estado = df[["Ano", estado]].dropna()
+
+    modelo = modelos[estado]
+
+    X = sm.add_constant(
+        dados_estado["Ano"]
+    )
+
+    estimados = modelo.predict(X)
+
+    plt.figure(figsize=(10, 5))
+
+    plt.scatter(
+        dados_estado["Ano"],
+        dados_estado[estado],
+        label="Casos observados"
+    )
+
+    plt.plot(
+        dados_estado["Ano"],
+        estimados,
+        label="Regressão linear",
+        linewidth=2
+    )
+
+    plt.title(f"Regressão Linear - {estado}")
+
+    plt.xlabel("Ano")
+
+    plt.ylabel("Número de casos")
+
+    plt.legend()
+
+    plt.grid(alpha=0.3)
+
+    plt.tight_layout()
+
+    plt.savefig(
+        GRAFICOS / f"regressao_{estado}.png",
+        dpi=150
+    )
+
+    plt.show()
+
+    plt.close()
+
+
+# ============================================================
+# 10. PROJEÇÃO DOS PRÓXIMOS 10 ANOS
+# ============================================================
+
+ultimo_ano = int(df["Ano"].max())
+
+anos_futuros = np.arange(
+    ultimo_ano + 1,
+    ultimo_ano + HORIZONTE + 1
+)
+
+projecoes = pd.DataFrame({
+
+    "Ano": anos_futuros
+
+})
+
+
+for estado in estados:
+
+    if estado not in modelos:
+
+        projecoes[estado] = np.nan
+
+        continue
+
+    X_futuro = sm.add_constant(
+        pd.DataFrame({
+            "Ano": anos_futuros
+        }),
+        has_constant="add"
+    )
+
+    estimativas = modelos[estado].predict(X_futuro)
+
+    # Impede projeções negativas.
+    projecoes[estado] = np.maximum(
+        estimativas,
+        0
+    )
+
+
+print("\nPROJEÇÕES DOS PRÓXIMOS 10 ANOS")
+
+print(projecoes.round(2).to_string(index=False))
+
+
+# ============================================================
+# 11. ANIMAÇÃO INTERATIVA DAS PROJEÇÕES
+# ============================================================
+
+ano_inicio = max(
+    int(df["Ano"].min()),
+    ultimo_ano - 4
+)
+
+historico = df[
+    df["Ano"] >= ano_inicio
+]
+
+fig = go.Figure()
+
+# Dados históricos iniciais.
+for estado in estados:
+
+    dados = historico[["Ano", estado]].dropna()
+
+    fig.add_trace(go.Scatter(
+
+        x=dados["Ano"],
+
+        y=dados[estado],
+
+        mode="lines+markers",
+
+        name=estado,
+
+        hovertemplate=
+            "<b>%{fullData.name}</b><br>" +
+            "Ano: %{x}<br>" +
+            "Casos: %{y:.0f}<extra></extra>"
+    ))
+
+
+# Criação dos frames.
+frames = []
+
+for ano_atual in anos_futuros:
+
+    traces = []
+
+    for estado in estados:
+
+        hist = historico[["Ano", estado]].dropna()
+
+        futuro = projecoes.loc[
+            projecoes["Ano"] <= ano_atual,
+            ["Ano", estado]
+        ].dropna()
+
+        anos = list(hist["Ano"]) + list(futuro["Ano"])
+
+        valores = (
+            list(hist[estado]) +
+            list(futuro[estado])
+        )
+
+        traces.append(go.Scatter(
+
+            x=anos,
+
+            y=valores,
+
+            mode="lines+markers",
+
+            name=estado,
+
+            hovertemplate=
+                "<b>%{fullData.name}</b><br>" +
+                "Ano: %{x}<br>" +
+                "Casos: %{y:.0f}<extra></extra>"
+        ))
+
+    frames.append(go.Frame(
+
+        data=traces,
+
+        name=str(ano_atual),
+
+        traces=list(range(len(estados))),
+
+        layout=go.Layout(
+            title_text=f"Projeção de Hanseníase - {ano_atual}"
+        )
+    ))
+
+
+fig.frames = frames
+
+
+# Configurações visuais e controles.
+fig.update_layout(
+
+    title="Projeção da Hanseníase por Estado",
+
+    xaxis=dict(
+        title="Ano",
+        range=[ano_inicio, int(anos_futuros[-1])]
+    ),
+
+    yaxis_title="Número de casos",
+
+    template="plotly_white",
+
+    width=1200,
+
+    height=700,
+
+    legend_title="Estados",
+
+    updatemenus=[{
+
+        "type": "buttons",
+
+        "buttons": [
+
+            {
+                "label": "▶ Reproduzir",
+
+                "method": "animate",
+
+                "args": [
+                    None,
+                    {
+                        "frame": {
+                            "duration": 800,
+                            "redraw": True
+                        },
+                        "transition": {
+                            "duration": 300
+                        },
+                        "fromcurrent": True
+                    }
+                ]
+            },
+
+            {
+                "label": "⏸ Pausar",
+
+                "method": "animate",
+
+                "args": [
+                    [None],
+                    {
+                        "mode": "immediate",
+                        "frame": {
+                            "duration": 0,
+                            "redraw": False
+                        }
+                    }
+                ]
+            }
+        ]
+    }],
+
+    sliders=[{
+
+        "active": 0,
+
+        "currentvalue": {
+            "prefix": "Ano projetado: "
+        },
+
+        "steps": [
+
+            {
+                "label": str(ano),
+
+                "method": "animate",
+
+                "args": [
+                    [str(ano)],
+                    {
+                        "mode": "immediate",
+                        "frame": {
+                            "duration": 500,
+                            "redraw": True
+                        }
+                    }
+                ]
+            }
+
+            for ano in anos_futuros
+        ]
+    }]
+)
+
+
+# Salva a animação em HTML.
+fig.write_html(
+    RESULTADOS / "projecao_hanseniase.html",
+    include_plotlyjs=True
+)
+
+fig.show()
+
+
+# ============================================================
+# 12. FINALIZAÇÃO
+# ============================================================
+
+print("\n" + "=" * 60)
+
+print("ANÁLISE ESTATÍSTICA CONCLUÍDA!")
+
+print("=" * 60)
+
+print("\nResultados disponíveis em:")
+
+print(RESULTADOS)
+
+print("\nGráficos:", GRAFICOS)
+
+print("\nAnimação: resultados/projecao_hanseniase.html")
+
+print("\nObservação: as projeções são extrapolações lineares")
+print("exploratórias e não representam previsões oficiais.")
